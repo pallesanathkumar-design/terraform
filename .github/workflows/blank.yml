@@ -1,0 +1,108 @@
+name: 'Terraform Production Deployment'
+
+# Trigger the workflow on pushes to main, and on pull requests
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# This concurrency block prevents two workflows from running at the same time
+# and corrupting your state file.
+concurrency:
+  group: terraform-production
+  cancel-in-progress: false
+
+# THESE PERMISSIONS ARE REQUIRED FOR OIDC (Zero-Key Authentication)
+permissions:
+  id-token: write   # Required to request the JWT token from GitHub
+  contents: read    # Required to checkout the code
+
+env:
+  AWS_REGION: "ap-south-1"
+  ROLE_TO_ASSUME: "arn:aws:iam::235063677946:role/GitHubActions-Terraform-Role"
+
+jobs:
+  terraform-plan:
+    name: 'Terraform Plan & Security Scan'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: "1.7.0" # Match your version
+
+    - name: Terraform Format Check
+      run: terraform fmt -check
+
+    - name: Terraform Init
+      run: terraform init -no-color
+
+    - name: Terraform Validate
+      run: terraform validate -no-color
+
+    # PRO-GRADE: Security scanning before we even plan
+    - name: Run Trivy vulnerability scanner in IaC mode
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        hide-progress: false
+        format: 'table'
+        exit-code: '1' # Fails the build if critical misconfigurations are found
+        severity: 'CRITICAL,HIGH'
+
+    - name: Terraform Plan
+      run: terraform plan -out=tfplan -no-color
+
+    # PRO-GRADE: We save the binary plan file to pass it to the apply job
+    - name: Upload Terraform Plan Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tfplan
+        path: tfplan
+        retention-days: 1
+
+  terraform-apply:
+    name: 'Terraform Apply'
+    # This ensures apply only runs if plan succeeds AND if we are on the main branch
+    needs: terraform-plan
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    
+    # PRO-GRADE: This triggers the manual approval in the GitHub UI!
+    environment: Production
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials via OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+
+    - name: Download Terraform Plan Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: tfplan
+
+    - name: Terraform Init
+      run: terraform init -no-color
+
+    - name: Terraform Apply
+      # Executes exactly what was planned, mathematically preventing configuration drift
+      run: terraform apply -auto-approve -no-color tfplan
