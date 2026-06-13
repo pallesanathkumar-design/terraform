@@ -12,10 +12,7 @@ resource "aws_instance" "test" {
 }
 
 
-resource "aws_s3_bucket" "demo-bucket" {
-    bucket = "bucket-e334533453sdf---7727727727"
-  
-}
+
 
 
 terraform {
